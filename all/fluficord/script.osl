@@ -1,15 +1,21 @@
+//save @= import("~/packages/save/v1.osl")
+
 isType = "normal"
 if passed_Data == "SYS.onboot" (
   isType = "notif"
-  window "stop"
 )
 
 import "window_tools" as "wt"
 import as "glass" from "packages"
 
-//permission "request" "rotur token"
-//permission "request" "start run"
-//permission "request" "notifications"
+if user.onboot.contains(my_path).not() (
+  permission "request" "start run"
+)
+if window.permissions.contains("notifications").not() (
+  permission "request" "notifications"
+)
+
+//save.init("fluficord@flufi")
 
 portName = ("social:" ++ OuidNew())
 
@@ -20,11 +26,24 @@ window "min_size" 175 300
 window.width = 900
 window.height = 500
 
+def "notifyCustom" "text,icon,title" (
+  file "open" my_uuid
+  local icn = file[11]
+  local name = file[2]
+  //file "set" 11 icon
+  //file "set" 2 title
+  notify text
+  //file "set" 11 icn
+  //file "set" 2 name
+)
+
 class Config (
   server = "flf-server"
   serversUrl = "https://raw.githubusercontent.com/ThePandaDever/flf/refs/heads/main/social/servers.json"
   servers = self.serversUrl.get().JsonParse()
+  version = "0.5f-"
 )
+Settings = null
 
 class Net (
   gotPingBack = false
@@ -44,6 +63,11 @@ class Net (
   messages = {}
   
   emotes = null
+  roles = null
+  tags = null
+  shush = false
+  users = {}
+  isMod = false
   
   def wipe() (
     self.gotPingBack = false
@@ -58,14 +82,18 @@ class Net (
     self.onlineUsers = null
     self.messages = {}
     self.emotes = null
+    self.roles = null
+    self.tags = null
+    self.users = {}
+    self.isMod = false
   )
   
   class packetworker (
     queue = []
     worker = null
     def start() (
-      self.worker = worker({
-        oncreated: def() -> (
+      self.worker @= worker({
+        oncreate: def() -> (
           portName.roturConnect()
         ),
         onframe: def() -> (
@@ -81,12 +109,12 @@ class Net (
     queue = []
     worker = null
     def start() (
-      self.worker = worker({
-        oncreated: def() -> (
+      self.worker @= worker({
+        oncreate: def() -> (
           oldtimer = timer
         ),
         onframe: def() -> (
-          if (timer - oldtimer) > 5 (
+          if (timer - oldtimer) > 120 (
             Net.send({"cmd":"ping"})
             oldtimer = timer
           )
@@ -97,12 +125,15 @@ class Net (
 
   
   def send(data) (
-    log "send" data
-    self.packetworker.queue.append(data)
+    if Net.shush.not() (
+      log "send" data
+      data["version"] = Config.version.destr
+      self.packetworker.queue.append(data)
+    )
   )
   def update() (
     if new_network_data (
-      //log "get" packet["data"]
+      log "get" packet["data"]
       Net.handlePacket(packet)
       new_network_data = false
     )
@@ -114,11 +145,16 @@ class Net (
   def handlePacket(p) (
     local data = p["data"]
     //log "get" data
+    
     if data.getKeys().contains("cmd") (
+      if data["cmd"] != "comb" (
+        //log "get" data
+      )
       switch data["cmd"] (
         case "ping"
           self.gotPingBack = true
           break
+        
         case "channel_list"
           self.channels = data["data"]
           break
@@ -150,18 +186,55 @@ class Net (
           self.getOnlineUsers()
           break
         
+        case "notif"
+          if Settings["notifs"] ?? false or data["doanyway"] (
+            notifyCustom data["text"] data["icon"] data["title"]
+          )
+          break
+        case "isMod"
+          self.isMod = data["data"]
+          break
+        
         case "user_online"
           self.onlineUsers = data["data"]
+          if (username in self.onlineUsers).not() (
+            self.onlineUsers @= self.onlineUsers.append(username)
+          )
+          UI.user_list.refresh()
+          break
+        case "user_settings_get"
+          Settings = data["data"]
+          if isType == "notif" and Settings["bg"].not() (
+            window.close()
+          )
+          break
+        case "user_tags_get"
+          self.tags ??= {}
+          self.tags[data["key"]] = data["data"]
+          break
+        case "user_get"
+          self.users[data.key] = data.data
+          UI.user_list.refresh()
           break
         
         case "emote_list"
           self.emotes = data["data"]
           break
         
+        case "roles_list"
+          self.roles = data["data"]
+          UI.user_list.refresh()
+          break
+        
         case "comb"
-          each this.packet2 data["packets"] (
+          each this.i this.packet2 data["packets"] (
             self.handlePacket({"data":packet2})
           )
+          break
+        case "killshutthefuckupidontwantpingsanymoresoshush"
+          self.packetworker.worker.kill()
+          self.onlineworker.worker.kill()
+          self.shush = true
           break
         
         default
@@ -171,19 +244,24 @@ class Net (
       )
     )
   )
-  def getRoturUser(u) (
-    if roturUsers.getKeys().contains(u).not() (
-      roturUsers[u] = ("https://social.rotur.dev/profile?name=" ++ u ++ "&include_posts=0").get()
-    )
-  )
   def getOnlineUsers() (
     Net.send({"cmd":"user_online"})
+  )
+  def getConfig() (
+    if self.getCooldown <= 0 (
+      self.getCooldown = 20
+      Net.send({"cmd":"user_settings_get"})
+    )
+  )
+  def setConfigKey(key,value) (
+    Net.send({"cmd":"user_settings_set","key":key,"value":value})
   )
   
   def ping() (
     Net.send({"cmd":"ping"})
     self.getCooldown = 50
   )
+  
   def getChannelList() (
     Net.send({"cmd":"channel_list"})
     self.getCooldown = 10
@@ -208,11 +286,14 @@ class Net (
   )
   
   def sendMessage(content, channel, reply, attachments) (
-    attachments = attachments == "attachments" ? null attachments
+    attachments = attachments == null ? null attachments
     Net.sendMessageRaw(channel,{"content":content,"attachments":attachments ?? [],"reply":reply})
   )
   def sendMessageRaw(channel,message) (
     Net.send({"cmd":"message_send","data":message,"channel":channel})
+  )
+  def deleteMessage(channel, message) (
+    Net.send({"cmd":"message_delete","data":message,"channel":channel})
   )
   
   def toggleEmote(message, emote) (
@@ -239,26 +320,61 @@ class UI (
   def drawEmote(emote, size) (
     local e = Net.emotes[emote]
     if e["text"] (
-      change size * -13 size * -1
-      text e["text"] size * 24 : c#txtc
+      change size * -20 + .75 size * .5 + .75
+      text e["text"] size * 35 : c#txtc
     ) else (
       icon e["icon"] ?? "grid-apps-full" size : c#txtc
     )
   )
   
   def drawText(text, size, color) (
-    text text size : c#color
+    text text ?? "" size : c#color
   )
   def getUnFormattedText(text) (
   
   )
-  
   def textHeight() (
     return 2
   )
   
+  def drawPFP(user, w, h) (
+    image "https://avatars.rotur.dev/" ++ (user ?? "_") ++ "?radius=256px" w + 1 h + 1
+  )
+  def drawUser(user, size, prefix) (
+    if prefix == "prefix" (
+      prefix = null
+    )
+    user ??= "?"
+    user = (prefix ?? "") ++ user
+    text user size
+  )
+   
+  def colorPad(t) (
+    return t.len == 2 ? t t.prepend("0")
+  )
+  
+  def lerpColor(a,b,t) (
+    local r1 = a.trim(2,3).toBase(16, 10).toNum()
+    local g1 = a.trim(4,5).toBase(16, 10).toNum()
+    local b1 = a.trim(6,7).toBase(16, 10).toNum()
+    local r2 = b.trim(2,3).toBase(16, 10).toNum()
+    local g2 = b.trim(4,5).toBase(16, 10).toNum()
+    local b2 = b.trim(6,7).toBase(16, 10).toNum()
+    return "#" ++ self.colorPad(floor(r2 - r1 * t + r1).toBase(10,16)) ++ self.colorPad(floor(g2 - g1 * t + g1).toBase(10,16)) ++ self.colorPad(floor(b2 - b1 * t + b1).toBase(10,16))
+  )
+  
+  def gradText(text, size, a, b) (
+    local len = text.len
+    local chari = 0
+    while chari < len (
+      c lerpColor(a,b,chari / len)
+      chari ++
+      text text[chari] size
+    )
+  )
+  
   class channel_list (
-    width = 200
+    width = 225
     real_width = self.width
     height = 0
     shown = true
@@ -267,7 +383,8 @@ class UI (
       self.shown = window.width > 500
       self.real_width = self.shown ? self.width 0
       if self.shown (
-        glass:frame window.left window.top window.left + self.real_width window.bottom UI.channel_list.height "channel_list"
+        c prim
+        glass:frame window.left window.top window.left + self.real_width window.bottom + 80 UI.channel_list.height - 15 + 10 "channel_list"
           UI.channel_list.list()
         frame "clear"
       )
@@ -279,7 +396,8 @@ class UI (
       )
       if Net.channels != null and loaded and typeof(Net.channels) == "array" (
         if Net.channels.len > 0 (
-          local y = frame.top - 27.5
+          local y = frame.top - 27.5 + frame.scroll
+          self.height = 0
           each this.channel Net.channels (
             local channelData = Net.channelData[channel]
             goto 0 y
@@ -295,12 +413,22 @@ class UI (
               if Input.mouse.leftClick (
                 UI.selected_channel = channel
                 UI.neededMessages[channel] = UI.neededMessagesDefault
+                UI.user_list.refresh()
+                UI.emote_menu.open = false
               )
             )
             goto frame.width * -.5 + 25 y
             icon UI.channelTypes[channelData["type"] ?? "unknown"].icon .9 : c#txtc
             text channel 10 : c#txtc chx#20
+            
+            if Net.channelUsers[channel] != Net.users.getKeys() (
+              goto frame.width * -.5 + 25 + 10 y + 10
+              icon "w 10 square 0 0 8 10" .6 : c#prim
+              icon "locked" .6 : c#txtc
+            )
+            
             y -= 50
+            self.height += 50
           )
         ) else (
           goto 0 0
@@ -334,7 +462,6 @@ class UI (
       if mouse_touching (
         cursor "pointer"
         if Input.mouse.leftClick (
-          void Config.server.roturSend({"cmd":"quit"})
           window "stop"
         )
       )
@@ -370,34 +497,52 @@ class UI (
     def update() (
       c prim
       frame window.left + UI.channel_list.real_width window.top - 40 window.right - UI.user_list.real_width window.bottom + UI.input_bar.height self.height "messages" (
-        local messages = Net.channelMessages[UI.selected_channel]
+        local messages @= Net.channelMessages[UI.selected_channel]
         local start = frame.bottom - (self.height > frame.height - 15 ? (frame.scrollMax.height - frame.scroll) 0)
         local y = start
         local total_h = 0
+        local isConnected @= def(msgData,otherData) -> (
+          // if its the same user, and the messages are less than 2 minutes apart
+          local timeconnected = msgData.timestamp != null and otherData.timestamp != null ? msgData.timestamp - otherData.timestamp < (2 * 60 * 1000) true
+          //temp["time"] = timeconnected
+          return msgData.user == otherData.user and timeconnected and msgData["reply"] == null
+        )
+        local sizeFunction = def(emote, spacing) -> (
+          return spacing + (emotes[emote].len.toStr().len * 10)
+        )
+        local drawPFP @= UI.drawPFP
+        local drawUser @= UI.drawUser
+        local drawText @= UI.drawText
+        local drawEmote @= UI.drawEmote
+        local messageSize = self.messageSize
+        contentCache ??= {}
+        heightCache ??= {}
+        isConnectedCache ??= {}
         each this.msgi this.msg messages (
-          local msgData = Net.messages[msg]
+          local msgData @= Net.messages[msg]
           local content = msgData.content.wrapText(frame.width / self.messageSize - 4)
+          local Muser = msgData.user
+          local cacheID = msgData.cacheID
           //temp = {}
-          local isConnected = def(msgData,otherData) -> (
-            // if its the same user, and the messages are less than 30 seconds apart
-            local timeconnected = true
-            if msgData.timestamp != null and otherData.timestamp != null (
-              timeconnected = msgData.timestamp - otherData.timestamp < (30 * 1000)
-            )
-            //temp["time"] = timeconnected
-            return msgData.user == otherData.user and timeconnected and msgData["reply"] == null
-          )
           local doTitle = (messages[msgi + 1] != null) ? isConnected(msgData,Net.messages[messages[msgi + 1]]).not true
           local connected = (messages[msgi - 1] != null) ? isConnected(Net.messages[messages[msgi - 1]],msgData) false
           local height = 0
-          local emotes = msgData["emotes"]
+          emotes = msgData["emotes"]
+          local emoteKeys = emotes.getKeys()
           height += content.split("\n").len * self.messageSize * 2.3
           height += doTitle ? (connected ? (self.messageSize * 2) 25) 0
-          height += emotes.getKeys().len > 0 ? 37.5 0
+          height += emotes.len > 0 ? 37.5 0
           height += msgData["reply"] != null ? 20 0
           total_h += height
+          if y > frame.top (
+            y += height
+            Continue
+          )
+          if y + height < frame.bottom (
+            y += height
+            Continue
+          )
           y += height * .5
-          
           goto 0 y
           square frame.width height 0 0 1
           local hovered = mouse_touching
@@ -414,7 +559,7 @@ class UI (
           )
           
           if hovered (
-            local actions = {
+            local actions @= {
               "reply": {
                 "icon": "w 4 line 0 8 -8 0 cont 0 -8 line -8 0 -2 0 cutcircle 0 -8 8 4.5 45" + (UI.replying_message == msg ? "w 7 c" + prim + "line -9 -9 9 9 9 -9 -9 9 c" + txtc + "w 4 line -9 -9 9 9 line 9 -9 -9 9 c" ""),
                 "code": def(msg) -> (
@@ -435,12 +580,20 @@ class UI (
                 )
               }
             }
+            if Net.isMod or Muser == username (
+              actions["delete"] = {
+                "icon": "bin",
+                "code": def(msg) -> (
+                  Net.deleteMessage(UI.selected_channel, msg)
+                )
+              }
+            )
             local actionWidth = 22
             goto frame.right - 25 y + (height / 2) - 12
             change_x actionWidth / 2
             each this.actionKey actions.getKeys() (
-              local action = actions[actionKey]
-              if action.shown ?? true (
+              local action @= actions[actionKey]
+              if action.shown !== null ? action.shown true (
                 square 10 10 10 : c#prim hover_c#seco
                 icon action["icon"] .6 : c#txtc
                 if mouse_touching (
@@ -455,44 +608,66 @@ class UI (
           )
           
           if msgData["reply"] != null (
-            goto frame.left + 30 y + (height / 2 - 13.5)
-            local replyMessage = Net.messages[msgData["reply"]]
+            goto frame.left + 50 y + (height / 2 - 13.5)
+            local replyMessage @= Net.messages[msgData["reply"]]
             if replyMessage == null (
               Net.getMessage(msgData["reply"])
             )
-            image "https://avatars.rotur.dev/" ++ (replyMessage.user ?? "_") 18 18 : chx#17.5 chy#0
-            text "@" ++ (replyMessage.user ?? "?") self.messageSize * .8 : chx#18 c#txtc chx#-6.25
-            UI.drawText(replyMessage.content.trimText(frame.width / (self.messageSize * .8) - 16), self.messageSize * .8, txtc) : chx#5
+            drawPFP(replyMessage.user, 14, 14)
+            drawUser(replyMessage.user, self.messageSize * .8, "@") : chx#16 c#txtc chx#-6.25
+            drawText(replyMessage.content.replace("\n"," ").trimText(frame.width / (self.messageSize * .8) - 16), self.messageSize * .8, txtc) : chx#5
             y -= 20
           )
           
           if doTitle (
             goto frame.left y + (height / 2 - 20)
-            image "https://avatars.rotur.dev/" ++ (msgData.user ?? "_") 25 25 : chx#17.5 chy#0
-            text msgData.user ?? "?" self.messageSize : chx#25 c#txtc chx#-6.25 chy#6.25
+            drawPFP(Muser, 25, 25) : chx#17.5 chy#0
+            local roleColor = UI.user_list.roleColorUsers[Muser]
+            if typeof(roleColor) == "string" (
+              drawUser(Muser, self.messageSize) : chx#25 c#roleColor chx#-6.25 chy#6.25
+            ) else (
+              UI.gradText(Muser, self.messageSize, roleColor[1], roleColor[2]) : chx#25 c#roleColor chx#-6.25 chy#6.25
+            )
             //log msgData.timestamp
-            text msgData.timestamp.timestamp("to-relative") self.messageSize * .7 : chx#10
+            change_x -6
+            local tags @= Net.tags[msgData.user] ?? []
+            if tags.len > 0 (
+              change_x -2
+            )
+            local tagi = 0
+            for this.tagi tags.len (
+              local tag @= tags[tagi]
+              square 20 20 0 0 1 : chx#22 tooltip#tag.tooltip
+              c txtc
+              if tag.color != null (
+                c tag.color
+              )
+              icon tag.icon .6 * (tag.size ?? 1)
+            )
+            change_x 6
+            text msgData.timestamp.timestamp("to-relative") self.messageSize * .7 : chx#10 c#txtc
           )
           
           goto frame.left y + (height / 2 - (doTitle ? (self.messageSize * 2) -2.5))
-          UI.drawText(content,self.messageSize,txtc) : chx#36.5 chy#-15
+          drawText(content,self.messageSize,txtc) : chx#36.5 chy#-15
           
-          if msgData["reply"] != null (
-            y += 20
-          )
+          y += msgData["reply"] != null ? 20 0
           
-          if emotes.getKeys().len > 0 (
+          if emoteKeys.len > 0 (
             local x2 = frame.left
             local spacing = 27.5
-            local sizeFunction = def(emote, spacing) -> (
-              return spacing + (emotes[emote].len.toStr().len * 10)
-            )
             local y2 = y - (height * .5) + 20.5
-            each this.emote emotes.getKeys() (
-              local emoteUsers = emotes[emote]
+            local showUsers = Settings["showEmoteUsers"]
+            each this.emote emoteKeys (
+              local emoteUsers @= emotes[emote]
               if emoteUsers.len > 0 (
-                goto x2 + 57.5 y2
                 local w3 = sizeFunction(emote, spacing)
+                if showUsers (
+                  local w4 = emoteUsers.len * 25
+                  w3 += w4
+                  x2 += w4 / 2
+                )
+                goto x2 + 57.5 y2
                 local pri = emoteUsers.contains(username.toLower()) ? seco prim
                 local hov = emoteUsers.contains(username.toLower()) ? tert seco
                 square w3 20 10 : c#pri hover_c#hov
@@ -502,16 +677,25 @@ class UI (
                     Net.toggleEmote(msg, emote)
                   )
                 )
-                goto x2 + 50 y2
-                UI.drawEmote(emote, .75)
-                goto x2 + 65 y2
+                goto x2 + 57.5 - (w3 * .5 - 10) y2
+                drawEmote(emote, .75)
+                goto x2 + 57.5 - (w3 * .5 - 25) y2
                 text emoteUsers.len 10 : c#txtc
+                if showUsers (
+                  goto x2 + 57.5 - (w3 * .5 - 25) y2
+                  each this.user emoteUsers (
+                    drawPFP(user, 20, 20) : chx#25
+                  )
+                  x2 += w4 / 2
+                )
                 x2 += spacing + (emoteUsers.len.toStr().len * 10) + 17.5
               )
             )
           )
           
           //text connected ++ "," + doTitle ++ "," + temp["time"] 10 : c#txtc chx#30
+          
+          //log performance - start
           
           y += height * .5
         )
@@ -524,7 +708,7 @@ class UI (
     height = 40
     def update() (
       frame window.left + UI.channel_list.real_width window.bottom + self.height window.right - UI.user_list.real_width window.bottom (
-        local height = min(inputs["input_bar"].len * 23 - 1, 150)
+        local height = min(inputs["input_bar"].len * 23, 150)
         loc 9999 -2 0 height * .5 + 9
         c prim
         self.height = height + 18
@@ -536,23 +720,97 @@ class UI (
         if "enter".onKeyDown() and "shift".isKeyDown().not() (
           Net.sendMessage(inputs["input_bar"].join("\n"), UI.selected_channel, UI.replying_message)
           UI.replying_message = null
-          inputs["input_bar"] = []
+          inputs["input_bar"] = [""]
         )
       )
     )
   )
   
   class user_list (
-    width = 200
+    width = 215
     real_width = self.width
     height = 0
     shown = true
+    
+    taggedUsers = []
+    sortedUsers = []
+    roleColorUsers = {}
+    roleCount = {}
+    
+    def refresh() (
+      self.taggedUsers = self.tagUsers(Net.users.getKeys())
+      self.sortedUsers = self.sortUsers(taggedUsers)
+      self.roleColorUsers = self.colorUsers(taggedUsers)
+      self.roleCount = {}
+      each this.user self.taggedUsers (
+        local role = user.role
+        self.roleCount[role] ??= 0
+        self.roleCount[role] ++
+      )
+    )
+    
+    def roleToNum(role) (
+      return (["offline","online"] ++ (Net.roles.getKeys() ?? [])).index(role)
+    )
+    
+    def sortRoles(roles) (
+      return roles.map(def(r) -> (
+        return {"name": r, "rank": self.roleToNum(r)}
+      )).sortBy("rank","ascending")
+    )
+    
+    def tagUsers(users) (
+      local newUsers = []
+      each this.user users (
+        local newUser @= {
+          "name": user,
+          "role": self.sortRoles(Net.users[user]["roles"])[-1].name ?? (Net.onlineUsers.contains(user) ? "online" "offline")
+        }
+        newUser["rank"] = self.roleToNum(newUser["role"])
+        newUsers @= newUsers.append(newUser)
+      )
+      return newUsers
+    )
+    
+    def colorUsers(users) (
+      local newUsers = {}
+      each this.user users (
+        local col = null
+        local roles = Net.users[user.name]["roles"]
+        each this.roleKey roles (
+          local role = Net.roles[roleKey]
+          if (role.color != null or role.colora != null) (
+            col = self.getRoleColor(role)
+            break
+          )
+        )
+        newUsers[user.name] = col ?? txtc
+      )
+      return newUsers
+    )
+    
+    def sortUsers(users) (
+      return users.sortBy("rank","ascending").reverse()
+    )
+    
+    def getRoleColor(role) (
+      if role != null (
+        if role.color != null (
+          return role.color
+        )
+        if role.colora != null (
+          return [role.colora,role.colorb]
+        )
+      )
+      return txtc
+    )
+    
     def update() (
       self.shown = window.width > (600 + self.width)
       self.real_width = self.shown ? self.width 0
       if self.shown (
         c prim
-        frame window.right - self.real_width window.top - 40 window.right window.bottom self.height "users" (
+        frame window.right - self.real_width window.top - 40 window.right window.bottom self.height + 10 "users" (
           goto 0 0
           line frame.left frame.top frame.left frame.bottom : c#prim
           
@@ -566,7 +824,7 @@ class UI (
             frame "clear"
             return
           )
-          local users = Net.channelUsers[UI.selected_channel]
+          local users @= Net.channelUsers[UI.selected_channel]
           
           if users == null (
             goto 0 0
@@ -577,26 +835,73 @@ class UI (
           ) else (
             local start = frame.top + scroll
             local y = start
-            each this.user users (
-              y -= 20
+            local lastRole = null
+            local roleColor = null
+            each this.userData self.sortedUsers (
+              local user = userData.name
+              y -= 10
+              
+              local roleName = userData.role
+              if roleName != lastRole (
+                local role @= Net.roles[roleName]
+                roleColor = self.getRoleColor(role)
+                y -= 4
+                goto frame.left + 10 y
+                if typeof(roleColor) == "string" (
+                  text roleName 10 : c#roleColor
+                  text "-" 10 : chx#5
+                  text self.roleCount[roleName] 10 : chx#5
+                ) else (
+                  local txt = roleName + "-" + self.roleCount[roleName]
+                  void UI.gradText(txt, 10, roleColor[1], roleColor[2])
+                )
+                y -= 20
+              )
+              lastRole = roleName
+              
+              y -= 10
+              
               goto 0 y
               square frame.width - 20 25 10 : c#prim
               set_x frame.left + 22
-              image "https://avatars.rotur.dev/" ++ user 25 25
+              UI.drawPFP(user, 25, 25)
               //icon "square 0 0 25 25" .5 : c#fff
               change 10 -10
               
-              local back = "c" + prim + "w 32 dot 0 0"
+              local back = "c" + prim + "w 30 dot 0 0"
               if Net.onlineUsers == null (
-                text "?" 8 : c#txtc
+                icon back .5
+                text "?" 6 : c#txtc chx#-3
               ) else if Net.onlineUsers.contains(user) (
-                icon back + "c #03c200 w 20 dot 0 0" .5
+                icon back + "c #03c200 w 19 dot 0 0" .5
               ) else (
-                icon back + "c #424242 w 5.5 cutcircle 0 0 7.5 0 180" .5
+                icon back + "c #424242 w 4.5 cutcircle 0 0 7 0 180" .5
               )
               
-              change_x 20
-              text user.trimText(frame.width - 60 / 10) 10 : c#txtc
+              change 12.5 10
+              local roleUserColor = self.roleColorUsers[user]
+              if typeof(roleUserColor) == "string" (
+                c roleUserColor
+                UI.drawUser(user.trimText(frame.width - 60 / 10), 10)
+              ) else (
+                void UI.gradText(user.trimText(frame.width - 60 / 10), 10, roleUserColor[1], roleUserColor[2])
+              )
+              
+              local tags = Net.tags[user] ?? []
+              if tags.len > 0 (
+                change_x -10
+                local tagi = 0
+                for this.tagi tags.len (
+                  local tag @= tags[tagi]
+                  square 20 20 0 0 1 : chx#22 tooltip#tag.tooltip
+                  c txtc
+                  if tag.color != null (
+                    c tag.color
+                  )
+                  icon tag.icon .6 * (tag.size ?? 1)
+                )
+              )
+              
               y -= 20
             )
             self.height = start - y - 20
@@ -666,6 +971,47 @@ class UI (
       )
     )
   )
+  
+  class info_panel (
+    def setting(name, icn, current, callback, data) (
+      c (current ?? false).toBool() ? tert prim
+      square 10 10 15 : hover_c#seco chx#30 tooltip#name
+      if mouse_touching (
+        cursor "pointer"
+        if onclick (
+          callback(data)
+        )
+      )
+      square 10 10 10 : c#prim
+      icon icn .65 : c#txtc
+    )
+    def update() (
+      if UI.channel_list.shown (
+        goto 0 0
+        line window.left + UI.channel_list.real_width - 2 window.bottom window.left + UI.channel_list.real_width - 2 window.bottom + 80 - 1 : c#prim
+        frame window.left window.bottom + 80 window.left + UI.channel_list.real_width window.bottom (
+          loc 2 9999 22.5 15
+          image "https://avatars.rotur.dev/" ++ username ++ "?radius=50px" 40 40
+          text username 10 : c#txtc chx#25 chy#9
+          loc 2 -2 15 - 30 17.5
+          
+          local toggle @= def(key) -> (
+            Settings[key] = Settings[key].not()
+            Net.setConfigKey(key,Settings[key])
+          )
+          
+          local settingKey = "notifs"
+          self.setting("notifications", "notifications", Settings[settingKey], toggle, settingKey)
+          
+          settingKey = "bg"
+          self.setting("background worker", "multitasking", Settings[settingKey], toggle, settingKey)
+          
+          settingKey = "showEmoteUsers"
+          self.setting("show emote users", "accounts", Settings[settingKey], toggle, settingKey)
+        )
+      )
+    )
+  )
 )
 
 class Input (
@@ -683,13 +1029,27 @@ Net.ping()
 Net.packetworker.start()
 Net.onlineworker.start()
 
+window.on("close", def() -> (
+  void Config.server.roturSend({"cmd":"quit","version":Config.version})
+))
+
 mainloop:
+  if isType == "notif" (
+    Net.update()
+    window.hide()
+    window.resize(0,0)
+    return
+  )
+  
   wt:load_theme
   Net.update()
   Input.update()
   
   if Net.gotPingBack and Net.channels == null and Net.getCooldown <= 0 (
     Net.getChannelList()
+  )
+  if Settings == null and Net.gotPingBack and Net.shush (
+    Net.getConfig()
   )
   each this.channel Net.channels (
     if Net.channelData.getKeys().contains(channel).not() (
@@ -699,7 +1059,7 @@ mainloop:
     ) else if Net.channelUsers.getKeys().contains(channel).not() (
       if Net.getCooldown <= 0 (
         //log channel Net.channelUsers Net.channelUsers.getKeys()
-        Net.getChannelUsers(channel)
+        //Net.getChannelUsers(channel)
       )
     ) else (
       if UI.neededMessages[channel] > 0 and (Net.channelMessagesLoaded[channel] ?? false).not() (
@@ -722,12 +1082,13 @@ mainloop:
   UI.mouse_x = mouse_x
   UI.mouse_y = mouse_y
   
-  UI.messages.update()
-  UI.input_bar.update()
-  UI.channel_list.update()
-  UI.user_list.update()
+  void UI.messages.update()
+  void UI.input_bar.update()
+  void UI.channel_list.update()
+  void UI.user_list.update()
   void UI.emote_menu.update()
-  UI.topbar.update()
+  void UI.topbar.update()
+  void UI.info_panel.update()
   
   if false (
     goto 0 0
